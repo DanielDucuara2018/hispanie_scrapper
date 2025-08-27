@@ -1,12 +1,16 @@
 import os
 import re
 import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 
 class FacebookEventScraper:
-    def __init__(self, headless=True, state_path="state.json"):
+    def __init__(self, url, headless=True, state_path="state.json"):
+        self.url = url
         self.headless = headless
         self.state_path = state_path
         self.playwright = None
@@ -34,7 +38,7 @@ class FacebookEventScraper:
                 browser = p.chromium.launch(headless=False)
                 context = browser.new_context()
                 page = context.new_page()
-                page.goto("https://www.facebook.com/login")
+                page.goto(f"{self.url}/login")
                 print("👉 Please log in manually...")
                 page.wait_for_timeout(120000)  # tiempo para loguearse
                 context.storage_state(path=self.state_path)
@@ -155,9 +159,8 @@ class FacebookEventScraper:
     # 🔹 Búsqueda de eventos
     # ---------------------------
     def scrape(self, ciudad, palabra_clave="", start_date=None, end_date=None):
-        url = f"https://www.facebook.com/events/search/?q={palabra_clave}"
+        url = f"{self.url}/events/search/?q={palabra_clave}"
         self.page.goto(url, timeout=60000)
-        # self.page.wait_for_selector("a[href*='/events/']", timeout=15000)
 
         # insertar ciudad
         location_selectors = [
@@ -228,7 +231,7 @@ class FacebookEventScraper:
                 eventos.append(
                     {
                         "titulo": info["titulo"],
-                        "link": clean_href,
+                        "link": f"{self.url}{clean_href}",
                         "fecha": info["fecha"],
                         "fecha_parseada": info["fecha_parseada"],
                         "ubicacion": info["ubicacion"],
@@ -247,6 +250,42 @@ class FacebookEventScraper:
             all_results[palabra] = eventos
         return all_results
 
+    # ---------------------------
+    # 🔹 Email sender
+    # ---------------------------
+    def send_events_email(
+        self,
+        eventos_dict,
+        sender_email,
+        password,
+        recipient_email,
+        smtp_server="smtp.gmail.com",
+        smtp_port=587,
+    ):
+        """Send events via email using SMTP."""
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "📅 Facebook Events Report"
+        msg["From"] = sender_email
+        msg["To"] = recipient_email
+
+        # build HTML body
+        html = "<h2>Facebook Events</h2>"
+        for palabra, eventos in eventos_dict.items():
+            html += f"<h3>{palabra.upper()}</h3><ul>"
+            for e in eventos:
+                html += f"<li><b>{e['titulo']}</b> - {e['fecha_parseada']} - {e['ubicacion']}<br>"
+                html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
+            html += "</ul>"
+
+        msg.attach(MIMEText(html, "html"))
+
+        # send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, password)
+            server.sendmail(sender_email, recipient_email, msg.as_string())
+        print(f"✅ Events sent to {recipient_email}")
+
 
 # ---------------------------
 # 🔹 Ejemplo de uso con context manager
@@ -255,13 +294,34 @@ if __name__ == "__main__":
     start = datetime.now()
     end = start + timedelta(days=7)
 
-    with FacebookEventScraper(headless=True) as scraper:
+    with FacebookEventScraper("https://www.facebook.com", headless=True) as scraper:
         resultados = scraper.scrape_multiple(
-            "Nantes",
-            ["salsa", "SBK", "bacchata", "baile"],
+            "nantes",
+            [
+                "Bailar",
+                "Baile",
+                "latina",
+                "latin",
+                "salsa",
+                "SBK",
+                "bachata",
+                "baile",
+                "kizomba",
+                "Brésil",
+                "Colombie",
+                "Perou",
+            ],
             start_date=start,
             end_date=end,
         )
+
+        # send results by email
+        # scraper.send_events_email(
+        #     resultados,
+        #     sender_email="youremail@gmail.com",
+        #     password="yourpassword",
+        #     recipient_email="target@example.com"
+        # )
 
     for palabra, eventos in resultados.items():
         print(f"\n=== {palabra.upper()} ===")
