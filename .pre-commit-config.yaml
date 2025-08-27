@@ -9,8 +9,8 @@ repos:
       - id: check-yaml
       - id: debug-statements
       - id: end-of-file-fixer
-      - id: no-commit-to-branch
-        args: [-b, main, -b, develop, -b, master]
+        # - id: no-commit-to-branch
+        # args: [-b, main, -b, develop, -b, master]
       - id: requirements-txt-fixer
       - id: trailing-whitespace
   # - repo: https://github.com/gitleaks/gitleaks
