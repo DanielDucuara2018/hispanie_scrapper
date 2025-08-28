@@ -2,10 +2,53 @@ import os
 import re
 import time
 import smtplib
+import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------
+# 🔹 Email sender
+# ---------------------------
+def send_events_email(
+    eventos_dict,
+    sender_email,
+    password,
+    recipient_emails,
+    smtp_server="smtp.gmail.com",
+    smtp_port=587,
+):
+    """Send events via email using SMTP."""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "📅 Facebook Events Report"
+    msg["From"] = sender_email
+    msg["To"] = ", ".join(recipient_emails)
+
+    # build HTML body
+    html = "<h1>Facebook Events</h1>"
+    for palabra, eventos in eventos_dict.items():
+        html += f"<h3>{palabra.capitalize()}</h3><ul>"
+        for e in eventos:
+            html += f"<li><b>{e['titulo']}</b> - {e['fecha_parseada']} - {e['ubicacion']}<br>"
+            html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
+        html += "</ul>"
+
+    msg.attach(MIMEText(html, "html"))
+
+    # send email
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(sender_email, password)
+        server.sendmail(sender_email, recipient_emails, msg.as_string())
+    logger.info(f"✅ Events sent to {recipient_emails}")
 
 
 class FacebookEventScraper:
@@ -39,13 +82,13 @@ class FacebookEventScraper:
                 context = browser.new_context()
                 page = context.new_page()
                 page.goto(f"{self.url}/login")
-                print("👉 Please log in manually...")
+                logger.info("👉 Please log in manually...")
                 page.wait_for_timeout(120000)  # tiempo para loguearse
                 context.storage_state(path=self.state_path)
                 browser.close()
-            print("✅ Login state saved to", self.state_path)
+            logger.info("✅ Login state saved to", self.state_path)
         else:
-            print("✅ state.json found, using saved login state.")
+            logger.info("✅ state.json found, using saved login state.")
 
     def open(self):
         """Abre el navegador con sesión guardada."""
@@ -79,7 +122,7 @@ class FacebookEventScraper:
                 continue
         return None
 
-    def _parse_event_info(self, card_text):
+    def _parse_event_info(self, card_text: str):
         """Extrae fecha, título, ubicación y stats de un texto de tarjeta de evento."""
         lines = card_text.split("\n")
         date_line, title_line, location_line = "", "", ""
@@ -146,7 +189,7 @@ class FacebookEventScraper:
                 except Exception:
                     pass
 
-        return {
+        extrated_data = {
             "fecha": date_line,
             "fecha_parseada": event_date.isoformat() if event_date else None,
             "titulo": title_line.strip() if title_line else "",
@@ -154,6 +197,9 @@ class FacebookEventScraper:
             "interesados": interested,
             "participantes": participants,
         }
+        logger.info(f"card_text: {card_text}")
+        logger.info(f"extrated_data: {extrated_data}")
+        return extrated_data
 
     # ---------------------------
     # 🔹 Búsqueda de eventos
@@ -245,46 +291,10 @@ class FacebookEventScraper:
         """Ejecuta varias búsquedas con una lista de palabras clave."""
         all_results = {}
         for palabra in palabras_claves:
-            print(f"🔍 Buscando: {palabra}")
+            logger.info(f"🔍 Buscando: {palabra}")
             eventos = self.scrape(ciudad, palabra, start_date, end_date)
             all_results[palabra] = eventos
         return all_results
-
-    # ---------------------------
-    # 🔹 Email sender
-    # ---------------------------
-    def send_events_email(
-        self,
-        eventos_dict,
-        sender_email,
-        password,
-        recipient_email,
-        smtp_server="smtp.gmail.com",
-        smtp_port=587,
-    ):
-        """Send events via email using SMTP."""
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = "📅 Facebook Events Report"
-        msg["From"] = sender_email
-        msg["To"] = recipient_email
-
-        # build HTML body
-        html = "<h2>Facebook Events</h2>"
-        for palabra, eventos in eventos_dict.items():
-            html += f"<h3>{palabra.upper()}</h3><ul>"
-            for e in eventos:
-                html += f"<li><b>{e['titulo']}</b> - {e['fecha_parseada']} - {e['ubicacion']}<br>"
-                html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
-            html += "</ul>"
-
-        msg.attach(MIMEText(html, "html"))
-
-        # send email
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender_email, password)
-            server.sendmail(sender_email, recipient_email, msg.as_string())
-        print(f"✅ Events sent to {recipient_email}")
 
 
 # ---------------------------
@@ -298,35 +308,36 @@ if __name__ == "__main__":
         resultados = scraper.scrape_multiple(
             "nantes",
             [
-                "Bailar",
-                "Baile",
+                "bailar",
+                "baile",
                 "latina",
+                "latino",
                 "latin",
+                "fiesta",
                 "salsa",
                 "SBK",
                 "bachata",
-                "baile",
                 "kizomba",
-                "Brésil",
-                "Colombie",
-                "Perou",
+                "brésil",
+                "colombie",
+                "perou",
             ],
             start_date=start,
             end_date=end,
         )
 
-        # send results by email
-        # scraper.send_events_email(
-        #     resultados,
-        #     sender_email="youremail@gmail.com",
-        #     password="yourpassword",
-        #     recipient_email="target@example.com"
-        # )
-
     for palabra, eventos in resultados.items():
-        print(f"\n=== {palabra.upper()} ===")
+        logger.info(f"\n=== {palabra.upper()} ===")
         for e in eventos:
-            print("📌", e["titulo"])
-            print("🔗", e["link"])
-            print("🗓️", e["fecha_parseada"])
-            print("-" * 50)
+            logger.info("📌", e["titulo"])
+            logger.info("🔗", e["link"])
+            logger.info("🗓️", e["fecha_parseada"])
+            logger.info("-" * 50)
+
+    # send results by email
+    send_events_email(
+        resultados,
+        sender_email="youremail@gmail.com",
+        password="yourpassword",
+        recipient_emails=["target@example.com"],
+    )
