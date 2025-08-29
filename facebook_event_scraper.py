@@ -7,12 +7,20 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+import locale
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Ensure French weekday/month parsing works
+try:
+    locale.setlocale(locale.LC_TIME, "fr_FR.UTF-8")
+except Exception:
+    pass  # fallback if system doesn't have French locale
 
 
 # ---------------------------
@@ -37,7 +45,7 @@ def send_events_email(
     for palabra, eventos in eventos_dict.items():
         html += f"<h3>{palabra.capitalize()}</h3><ul>"
         for e in eventos:
-            html += f"<li><b>{e['titulo']}</b> - {e['fecha_parseada']} - {e['ubicacion']}<br>"
+            html += f"<li><b>{e['titulo']}</b> - {e['fecha']} - {e['ubicacion']}<br>"
             html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
         html += "</ul>"
 
@@ -48,7 +56,98 @@ def send_events_email(
         server.starttls()
         server.login(sender_email, password)
         server.sendmail(sender_email, recipient_emails, msg.as_string())
-    logger.info(f"✅ Events sent to {recipient_emails}")
+    logger.info("✅ Events sent to: %s", recipient_emails)
+
+
+# TODO fix this method. Start date and end date are wrong
+def parse_event_date(date_text: str, ref_date: datetime = None):
+    """
+    Parse event date formats like:
+    - 'Demain de 19:00 à 23:00'
+    - 'samedi de 20:00 à 01:30'
+    - 'Samedi 11 avril 2026 de 20:00 à 01:30'
+    Returns: (start_datetime, end_datetime)
+    """
+    if ref_date is None:
+        ref_date = datetime.now()
+
+    date_text = date_text.strip().lower()
+    start_dt, end_dt = None, None
+
+    # Extract times
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*à\s*(\d{1,2}:\d{2})", date_text)
+    if not time_match:
+        return None, None
+    start_time_str, end_time_str = time_match.groups()
+
+    # Default event date = today
+    event_date = ref_date.date()
+
+    # Case 1: "Demain ..."
+    if "demain" in date_text:
+        event_date = (ref_date + timedelta(days=1)).date()
+
+    # Case 2: "samedi 11 avril 2026"
+    full_date_match = re.search(
+        r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})", date_text, re.IGNORECASE
+    )
+    if full_date_match:
+        day, month_fr, year = full_date_match.groups()
+        fr_months = {
+            "janvier": "january",
+            "février": "february",
+            "mars": "march",
+            "avril": "april",
+            "mai": "may",
+            "juin": "june",
+            "juillet": "july",
+            "août": "august",
+            "septembre": "september",
+            "octobre": "october",
+            "novembre": "november",
+            "décembre": "december",
+        }
+        month_en = fr_months.get(month_fr.strip("."), month_fr)
+        try:
+            event_date = datetime.strptime(
+                f"{day} {month_en} {year}", "%d %B %Y"
+            ).date()
+        except Exception:
+            pass
+
+    # Case 3: only weekday (samedi, dimanche, etc.)
+    else:
+        weekdays = {
+            "lundi": 0,
+            "mardi": 1,
+            "mercredi": 2,
+            "jeudi": 3,
+            "vendredi": 4,
+            "samedi": 5,
+            "dimanche": 6,
+        }
+        for wd_name, wd_num in weekdays.items():
+            if wd_name in date_text:
+                days_ahead = (wd_num - ref_date.weekday()) % 7
+                event_date = (ref_date + timedelta(days=days_ahead)).date()
+                break
+
+    # Parse start/end times
+    start_hour, start_min = map(int, start_time_str.split(":"))
+    end_hour, end_min = map(int, end_time_str.split(":"))
+
+    start_dt = datetime.combine(event_date, datetime.min.time()).replace(
+        hour=start_hour, minute=start_min
+    )
+    end_dt = datetime.combine(event_date, datetime.min.time()).replace(
+        hour=end_hour, minute=end_min
+    )
+
+    # Handle overnight
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+
+    return start_dt, end_dt
 
 
 class FacebookEventScraper:
@@ -56,6 +155,7 @@ class FacebookEventScraper:
         self.url = url
         self.headless = headless
         self.state_path = state_path
+        self.seen = set()
         self.playwright = None
         self.browser = None
         self.context = None
@@ -86,7 +186,7 @@ class FacebookEventScraper:
                 page.wait_for_timeout(120000)  # tiempo para loguearse
                 context.storage_state(path=self.state_path)
                 browser.close()
-            logger.info("✅ Login state saved to", self.state_path)
+            logger.info("✅ Login state saved to: %s", self.state_path)
         else:
             logger.info("✅ state.json found, using saved login state.")
 
@@ -122,84 +222,91 @@ class FacebookEventScraper:
                 continue
         return None
 
-    def _parse_event_info(self, card_text: str):
-        """Extrae fecha, título, ubicación y stats de un texto de tarjeta de evento."""
-        lines = card_text.split("\n")
-        date_line, title_line, location_line = "", "", ""
-        interested, participants = None, None
+    def _parse_event_page(self, event_url: str, keyword: str, city: str) -> dict | None:
+        """Visita la página del evento y extrae fecha, título, ubicación y stats."""
+        try:
+            logger.info("🔗 Visiting event page: %s", event_url)
+            self.page.goto(event_url, timeout=60000)
+        except Exception:
+            logger.error("❌ Error visiting event page")
+            return None
+
+        # título
+        try:
+            title = (
+                self.page.query_selector(f"span:has-text('{keyword}')")
+                .inner_text()
+                .strip()
+            )
+        except Exception:
+            logger.error("❌ Error extracting event title")
+            title = ""
 
         # fecha
-        date_pattern = r"^(Dim|Lun|Mar|Mer|Jeu|Ven|Sam|Sun|Mon|Tue|Wed|Thu|Fri|Sat)[^\n]*\d{1,2} [a-zéû\.]+ à \d{1,2}:\d{2}"
-        for i, line in enumerate(lines):
-            if re.match(date_pattern, line, re.IGNORECASE):
-                date_line = line
-                if i + 1 < len(lines):
-                    title_line = lines[i + 1]
-                if i + 2 < len(lines):
-                    location_line = lines[i + 2]
-                break
+        try:
+            date_line = ""
+            blocks = self.page.query_selector_all("div[role='button'][tabindex='0']")
+            for block in blocks:
+                spans = block.query_selector_all("span[dir='auto']")
+                for s in spans:
+                    text = s.inner_text().strip()
+                    if re.search(
+                        r"\d{1,2}:\d{2}\s*à\s*\d{1,2}:\d{2}", text
+                    ):  # pattern "20:00 à 01:30"
+                        date_line = text
+                        break
+        except Exception:
+            logger.error("❌ Error extracting event date")
+            date_line = ""
 
-        # stats
-        stats_pattern = r"(\d+)\s+intéressés.*?(\d+)\s+participants"
-        for line in lines:
-            m = re.search(stats_pattern, line)
-            if m:
-                interested = int(m.group(1))
-                participants = int(m.group(2))
-                break
-
-        # fecha parseada (fr → en)
-        event_date = None
-        if date_line:
-            fr_months = {
-                "janv.": "Jan",
-                "févr.": "Feb",
-                "mars": "Mar",
-                "avr.": "Apr",
-                "mai": "May",
-                "juin": "Jun",
-                "juil.": "Jul",
-                "août": "Aug",
-                "sept.": "Sep",
-                "oct.": "Oct",
-                "nov.": "Nov",
-                "déc.": "Dec",
-            }
-            for fr, en in fr_months.items():
-                date_line = date_line.replace(fr, en)
-            date_line = re.sub(
-                r"^(Dim|Lun|Mar|Mer|Jeu|Ven|Sam|Sun|Mon|Tue|Wed|Thu|Fri|Sat),?\s*",
-                "",
-                date_line,
-                flags=re.IGNORECASE,
+        # ubicación
+        city = city.capitalize()
+        try:
+            location = (
+                self.page.query_selector(
+                    f"span:has-text('à {city} ({city})'), span:has-text('{city}, France')"
+                )
+                .inner_text()
+                .strip()
             )
-            m = re.search(r"(\d{1,2}) ([A-Za-z]+) à (\d{1,2}):(\d{2})", date_line)
-            if m:
-                try:
-                    day, month, hour, minute = (
-                        int(m.group(1)),
-                        m.group(2),
-                        int(m.group(3)),
-                        int(m.group(4)),
-                    )
-                    year = datetime.now().year
-                    event_date = datetime.strptime(
-                        f"{day} {month} {year} {hour}:{minute}", "%d %b %Y %H:%M"
-                    )
-                except Exception:
-                    pass
+        except Exception:
+            logger.error("❌ Error extracting event location")
+            location = ""
 
-        extrated_data = {
+        # stats: interesados / participantes
+        # interested, participants = None, None
+        # try:
+        #     stats_texts = [
+        #         el.inner_text()
+        #         for el in self.page.query_selector_all("div, span")
+        #         if el and ("intéressé" in el.inner_text() or "participant" in el.inner_text())
+        #     ]
+        #     stats_pattern = r"(\d+)\s+intéressés?.*?(\d+)\s+participants?"
+        #     for text in stats_texts:
+        #         m = re.search(stats_pattern, text)
+        #         if m:
+        #             interested = int(m.group(1))
+        #             participants = int(m.group(2))
+        #             break
+        # except Exception:
+        #     logger.error("❌ Error extracting event stats")
+        #     pass
+        start_dt, end_dt = "", ""
+        if date_line:
+            start_dt, end_dt = parse_event_date(date_line)
+            date_line = f"from {start_dt} to {end_dt}"
+
+        extracted_info = {
             "fecha": date_line,
-            "fecha_parseada": event_date.isoformat() if event_date else None,
-            "titulo": title_line.strip() if title_line else "",
-            "ubicacion": location_line.strip() if location_line else "",
-            "interesados": interested,
-            "participantes": participants,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "titulo": title,
+            "ubicacion": location,
+            # "interesados": interested,
+            # "participantes": participants,
         }
-        logger.info(f"card_text: {card_text}")
-        logger.info(f"extrated_data: {extrated_data}")
-        return extrated_data
+        logger.info("✅ Event parsed: %s", extracted_info)
+        return extracted_info
 
     # ---------------------------
     # 🔹 Búsqueda de eventos
@@ -220,7 +327,7 @@ class FacebookEventScraper:
         location_input_sel = self._find_input(location_selectors)
         if location_input_sel:
             self.page.fill(location_input_sel, ciudad)
-            time.sleep(2)
+            time.sleep(1)
             self.page.keyboard.press("ArrowDown")
             time.sleep(1)
             try:
@@ -230,59 +337,58 @@ class FacebookEventScraper:
                 for s in suggestions:
                     if s.is_visible():
                         s.click()
-                        time.sleep(2)
+                        time.sleep(1)
                         break
             except Exception:
                 pass
             self.page.keyboard.press("Enter")
-            time.sleep(3)
+            time.sleep(1)
 
         # scroll infinito
         prev_height = 0
         for _ in range(10):
             self.page.mouse.wheel(0, 3000)
-            time.sleep(3)
+            time.sleep(1)
             new_height = self.page.evaluate("document.body.scrollHeight")
             if new_height == prev_height:
                 break
             prev_height = new_height
 
         # extraer eventos
-        eventos, seen = [], set()
-        links = self.page.query_selector_all("a[href*='/events/']")
-        for link in links:
-            href = link.get_attribute("href")
-            if not href or "events" not in href:
+        eventos = []
+        hrefs = [
+            link.get_attribute("href")
+            for link in self.page.query_selector_all("a[href*='/events/']")
+        ]
+        for href in hrefs:
+            if not href or "events" not in href or self.url in href:
                 continue
             clean_href = href.split("?")[0]
-            if clean_href in seen:
+            if clean_href in self.seen:
                 continue
-            seen.add(clean_href)
+            self.seen.add(clean_href)
 
-            try:
-                card_text = link.evaluate("node => node.closest('div').innerText")
-            except Exception:
-                card_text = ""
-            info = self._parse_event_info(card_text)
-            event_date = (
-                datetime.fromisoformat(info["fecha_parseada"])
-                if info["fecha_parseada"]
-                else None
-            )
+            # ahora visitamos la página del evento
+            info = self._parse_event_page(self.url + clean_href, palabra_clave, ciudad)
+            if not all(info.values()):
+                continue
 
+            start_dt = info["start_dt"]
+            end_dt = info["end_dt"]
             matches_date = not (start_date and end_date) or (
-                event_date and start_date <= event_date <= end_date
+                start_dt and start_date <= start_dt <= end_date
             )
             if matches_date:
                 eventos.append(
                     {
                         "titulo": info["titulo"],
-                        "link": f"{self.url}{clean_href}",
+                        "link": self.url + clean_href,
                         "fecha": info["fecha"],
-                        "fecha_parseada": info["fecha_parseada"],
+                        "start_dt": start_dt,
+                        "end_dt": end_dt,
                         "ubicacion": info["ubicacion"],
-                        "interesados": info["interesados"],
-                        "participantes": info["participantes"],
+                        # "interesados": info["interesados"],
+                        # "participantes": info["participantes"],
                     }
                 )
         return eventos
@@ -291,7 +397,7 @@ class FacebookEventScraper:
         """Ejecuta varias búsquedas con una lista de palabras clave."""
         all_results = {}
         for palabra in palabras_claves:
-            logger.info(f"🔍 Buscando: {palabra}")
+            logger.info("🔍 Buscando: %s", palabra)
             eventos = self.scrape(ciudad, palabra, start_date, end_date)
             all_results[palabra] = eventos
         return all_results
@@ -327,11 +433,13 @@ if __name__ == "__main__":
         )
 
     for palabra, eventos in resultados.items():
-        logger.info(f"\n=== {palabra.upper()} ===")
+        logger.info("\n=== %s ===", palabra)
         for e in eventos:
-            logger.info("📌", e["titulo"])
-            logger.info("🔗", e["link"])
-            logger.info("🗓️", e["fecha_parseada"])
+            logger.info("📌 %s", e["titulo"])
+            logger.info("🔗 %s", e["link"])
+            logger.info("🗓️ %s", e["fecha"])
+            logger.info("🗓️ %s", e["start_dt"])
+            logger.info("🗓️ %s", e["end_dt"])
             logger.info("-" * 50)
 
     # send results by email
