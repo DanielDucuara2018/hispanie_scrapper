@@ -7,6 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+from typing import Any
 import locale
 
 logging.basicConfig(
@@ -23,11 +24,17 @@ except Exception:
     pass  # fallback if system doesn't have French locale
 
 
+DATE_FMT = "%Y-%m-%d"
+
+
 # ---------------------------
 # 🔹 Email sender
 # ---------------------------
 def send_events_email(
-    eventos_dict,
+    eventos: dict[str, list[dict[str, Any]]],
+    city: str,
+    start_date: datetime,
+    end_date: datetime,
     sender_email,
     password,
     recipient_emails,
@@ -36,14 +43,15 @@ def send_events_email(
 ):
     """Send events via email using SMTP."""
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📅 Facebook Events Report"
+    msg["Subject"] = (
+        f"📅 Facebook Events Report {city.capitalize()}. From {start_date.strftime(DATE_FMT)} to {end_date.strftime(DATE_FMT)}"
+    )
     msg["From"] = sender_email
     msg["To"] = ", ".join(recipient_emails)
 
     # build HTML body
     html = "<h1>Facebook Events</h1>"
-    for palabra, eventos in eventos_dict.items():
-        html += f"<h3>{palabra.capitalize()}</h3><ul>"
+    for eventos in eventos.values():
         for e in eventos:
             html += f"<li><b>{e['titulo']}</b> - {e['fecha']} - {e['ubicacion']}<br>"
             html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
@@ -66,6 +74,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     - 'Demain de 19:00 à 23:00'
     - 'samedi de 20:00 à 01:30'
     - 'Samedi 11 avril 2026 de 20:00 à 01:30'
+    - TODO this case 'du 18 déc. 20:00 au 22 déc. 03:00'
     Returns: (start_datetime, end_datetime)
     """
     if ref_date is None:
@@ -273,24 +282,6 @@ class FacebookEventScraper:
             logger.error("❌ Error extracting event location")
             location = ""
 
-        # stats: interesados / participantes
-        # interested, participants = None, None
-        # try:
-        #     stats_texts = [
-        #         el.inner_text()
-        #         for el in self.page.query_selector_all("div, span")
-        #         if el and ("intéressé" in el.inner_text() or "participant" in el.inner_text())
-        #     ]
-        #     stats_pattern = r"(\d+)\s+intéressés?.*?(\d+)\s+participants?"
-        #     for text in stats_texts:
-        #         m = re.search(stats_pattern, text)
-        #         if m:
-        #             interested = int(m.group(1))
-        #             participants = int(m.group(2))
-        #             break
-        # except Exception:
-        #     logger.error("❌ Error extracting event stats")
-        #     pass
         start_dt, end_dt = "", ""
         if date_line:
             start_dt, end_dt = parse_event_date(date_line)
@@ -302,8 +293,6 @@ class FacebookEventScraper:
             "end_dt": end_dt,
             "titulo": title,
             "ubicacion": location,
-            # "interesados": interested,
-            # "participantes": participants,
         }
         logger.info("✅ Event parsed: %s", extracted_info)
         return extracted_info
@@ -370,7 +359,7 @@ class FacebookEventScraper:
 
             # ahora visitamos la página del evento
             info = self._parse_event_page(self.url + clean_href, palabra_clave, ciudad)
-            if not all(info.values()):
+            if not info or not all(info.values()):
                 continue
 
             start_dt = info["start_dt"]
@@ -387,8 +376,6 @@ class FacebookEventScraper:
                         "start_dt": start_dt,
                         "end_dt": end_dt,
                         "ubicacion": info["ubicacion"],
-                        # "interesados": info["interesados"],
-                        # "participantes": info["participantes"],
                     }
                 )
         return eventos
@@ -409,31 +396,126 @@ class FacebookEventScraper:
 if __name__ == "__main__":
     start = datetime.now()
     end = start + timedelta(days=7)
+    city = "paris"
 
     with FacebookEventScraper("https://www.facebook.com", headless=True) as scraper:
         resultados = scraper.scrape_multiple(
-            "nantes",
+            city,
             [
-                "bailar",
-                "baile",
-                "latina",
-                "latino",
-                "latin",
-                "fiesta",
-                "salsa",
-                "SBK",
-                "bachata",
-                "kizomba",
-                "brésil",
+                "Son Cubain",
+                "erasmus",
+                "Panama",
+                "Garifuna",
                 "colombie",
+                "Ranchera",
+                "Pasillo",
+                "Tango",
+                "salsa",
+                "bresil",
+                "Venezuela",
+                "kizomba",
+                "Mambo",
+                "Punta",
+                "Candombe",
+                "tejido",
+                "SBK",
+                "hispanique",
+                "Joropo",
+                "Panama",
+                "Colombie",
+                "Peru",
+                "forro",
+                "Republica Dominicana",
+                "Nicaragua",
+                "Murga",
+                "bailar",
+                "Guanacasteco",
+                "Bolivia",
+                "Spain",
+                "Ecuador",
+                "Zuliana",
+                "Chota",
+                "latin",
+                "cueca",
+                "Colombia",
+                "Argentina",
+                "Español",
+                "Corrido",
+                "Chile",
+                "champeta",
+                "Perou",
+                "arepa",
+                "Peru",
+                "Dominican Republic",
+                "Tamborito",
+                "Rumba",
+                "Bolivie",
+                "Criolla",
+                "bachata",
+                "empanada",
+                "flamenco",
+                "cumbia",
+                "fiesta",
+                "Guatemala",
+                "Cuban Son",
+                "samba",
+                "Porto Rico",
+                "El Salvador",
+                "Hispano",
+                "funk",
                 "perou",
+                "Mexique",
+                "Mexico",
+                "Chapin",
+                "Regueton",
+                "currulao",
+                "Son Cubano",
+                "reggaeton",
+                "merengue",
+                "folclor",
+                "criollo",
+                "latina",
+                "Paraguay",
+                "Espagnol",
+                "Uruguay",
+                "Costa Rica",
+                "Mariachi",
+                "Banda",
+                "carioca",
+                "Folclore",
+                "latino",
+                "vallenato",
+                "Brasil",
+                "bossa",
+                "Puerto Rico",
+                "Marinera",
+                "Chili",
+                "Dembow",
+                "Salvador",
+                "España",
+                "Festejo",
+                "Spanish",
+                "forro",
+                "Argentine",
+                "Hispanic",
+                "Mexico",
+                "Espagne",
+                "Xuc",
+                "caporales",
+                "Bachata",
+                "Llanera",
+                "Honduras",
+                "Cuba",
+                "villera",
+                "Equateur",
+                "baile",
+                "Republique dominicaine",
             ],
             start_date=start,
             end_date=end,
         )
 
-    for palabra, eventos in resultados.items():
-        logger.info("\n=== %s ===", palabra)
+    for eventos in resultados.values():
         for e in eventos:
             logger.info("📌 %s", e["titulo"])
             logger.info("🔗 %s", e["link"])
@@ -445,6 +527,9 @@ if __name__ == "__main__":
     # send results by email
     send_events_email(
         resultados,
+        city,
+        start,
+        end,
         sender_email="youremail@gmail.com",
         password="yourpassword",
         recipient_emails=["target@example.com"],
