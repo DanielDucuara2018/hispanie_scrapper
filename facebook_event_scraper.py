@@ -25,6 +25,7 @@ except Exception:
 
 
 DATE_FMT = "%Y-%m-%d"
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 # ---------------------------
@@ -285,7 +286,7 @@ class FacebookEventScraper:
         start_dt, end_dt = "", ""
         if date_line:
             start_dt, end_dt = parse_event_date(date_line)
-            date_line = f"from {start_dt} to {end_dt}"
+            date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
 
         extracted_info = {
             "fecha": date_line,
