@@ -105,7 +105,7 @@ def send_events_email(
     html = "<h1>Facebook Events</h1>"
     for eventos in eventos.values():
         for e in eventos:
-            html += f"<li><b>{e['titulo']}</b> - {e['fecha']} - {e['ubicacion']}<br>"
+            html += f"<li><b>{e['title']}</b> - {e['date']} - {e['location']}<br>"
             html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
         html += "</ul>"
 
@@ -291,7 +291,7 @@ class FacebookEventScraper:
         self._ensure_login_state()
         self.playwright = sync_playwright().start()
         if os.path.exists(self.state_path):
-            self.browser = self.playwright.chromium.launch(headless=False)
+            self.browser = self.playwright.chromium.launch(headless=self.headless)
             self.context = self.browser.new_context(storage_state=self.state_path)
         else:
             self.browser = self.playwright.chromium.launch(headless=False)
@@ -794,9 +794,9 @@ if __name__ == "__main__":
 
     for eventos in resultados.values():
         for e in eventos:
-            logger.info("📌 %s", e["titulo"])
+            logger.info("📌 %s", e["title"])
             logger.info("🔗 %s", e["link"])
-            logger.info("🗓️ %s", e["fecha"])
+            logger.info("🗓️ %s", e["date"])
             logger.info("🗓️ %s", e["start_dt"])
             logger.info("🗓️ %s", e["end_dt"])
             logger.info("-" * 50)
