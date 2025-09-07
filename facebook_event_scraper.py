@@ -28,7 +28,8 @@ DATE_FMT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 REGEX_TIME_CASE = r"(\d{1,2}:\d{2})\s*à\s*(\d{1,2}:\d{2})"
-REGEX_DATE_CASE_2 = r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})"
+REGEX_DATE_CASE_2 = r"(?:[a-zéû\.]+)\s+de\s+(\d{1,2}:\d{2})\s+à\s+(\d{1,2}:\d{2})"
+REGEX_DATE_CASE_3 = r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})"
 REGEX_DATE_CASE_4 = r"(?:[a-zéû\.]+)?\s*(\d{1,2}) ([a-zéû\.]+) (\d{4}) à (\d{2}:\d{2})"
 REGEX_DATE_CASE_5 = r"du (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2}) au (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2})"
 
@@ -41,11 +42,11 @@ def send_events_email(
     city: str,
     start_date: datetime,
     end_date: datetime,
-    sender_email,
-    password,
-    recipient_emails,
-    smtp_server="smtp.gmail.com",
-    smtp_port=587,
+    sender_email: str,
+    password: str,
+    recipient_emails: list[str],
+    smtp_server: str = "smtp.gmail.com",
+    smtp_port: int = 587,
 ):
     """Send events via email using SMTP."""
     msg = MIMEMultipart("alternative")
@@ -103,24 +104,25 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         "octobre": "october",
         "novembre": "november",
         "décembre": "december",
-        "janv.": "january",
-        "févr.": "february",
-        "avr.": "april",
-        "juil.": "july",
-        "sept.": "september",
-        "oct.": "october",
-        "nov.": "november",
-        "déc.": "december",
-        "mar.": "march",
+        "janv": "january",
+        "févr": "february",
+        "avr": "april",
+        "juil": "july",
+        "sept": "september",
+        "oct": "october",
+        "nov": "november",
+        "déc": "december",
+        "mar": "march",
     }
 
-    # Case: du 18 déc. 20:00 au 22 déc. 03:00
+    # Case 5: du 18 déc. 20:00 au 22 déc. 03:00
     range_match = re.search(REGEX_DATE_CASE_5, date_text)
     if range_match:
         day1, month1, time1, day2, month2, time2 = range_match.groups()
         month1_en = fr_months.get(month1.strip("."), month1)
         month2_en = fr_months.get(month2.strip("."), month2)
         year = ref_date.year
+        # Infer year for start and end dates
         try:
             start_dt = datetime.strptime(
                 f"{day1} {month1_en} {year} {time1}", "%d %B %Y %H:%M"
@@ -128,14 +130,18 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
             end_dt = datetime.strptime(
                 f"{day2} {month2_en} {year} {time2}", "%d %B %Y %H:%M"
             )
-            # If end date is before start, assume next year
+            # If end date is before start, increment year for end date
             if end_dt < start_dt:
                 end_dt = end_dt.replace(year=year + 1)
+            # If start date is before today, increment year for start date
+            if start_dt < ref_date:
+                start_dt = start_dt.replace(year=year + 1)
         except Exception:
+            logger.error(f"❌ Error parsing date range case 5: {date_text}")
             return None, None
         return start_dt, end_dt
 
-    # Case: Vendredi 19 septembre 2025 à 21:00
+    # Case 4: Vendredi 19 septembre 2025 à 21:00
     single_match = re.search(REGEX_DATE_CASE_4, date_text)
     if single_match:
         day, month, year, time_str = single_match.groups()
@@ -146,6 +152,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
             )
             end_dt = start_dt
         except Exception:
+            logger.error(f"❌ Error parsing single date case 4: {date_text}")
             return None, None
         return start_dt, end_dt
 
@@ -163,7 +170,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         event_date = (ref_date + timedelta(days=1)).date()
 
     # Case 2: "samedi 11 avril 2026"
-    full_date_match = re.search(REGEX_DATE_CASE_2, date_text)
+    full_date_match = re.search(REGEX_DATE_CASE_3, date_text)
     if full_date_match:
         day, month_fr, year = full_date_match.groups()
         month_en = fr_months.get(month_fr.strip("."), month_fr)
@@ -172,9 +179,10 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
                 f"{day} {month_en} {year}", "%d %B %Y"
             ).date()
         except Exception:
+            logger.error(f"❌ Error parsing full date case 2: {date_text}")
             pass
 
-    # Case 3: only weekday (samedi, dimanche, etc.)
+    # Case 3: only weekday (samedi, dimanche, etc.) or "mercredi de 23:00 à 05:00"
     else:
         weekdays = {
             "lundi": 0,
@@ -202,7 +210,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         hour=end_hour, minute=end_min
     )
 
-    # Handle overnight
+    # Handle overnight (end time is less than start time)
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
 
@@ -407,6 +415,7 @@ class FacebookEventScraper:
                         re.search(pattern, text, re.IGNORECASE)
                         for pattern in [
                             REGEX_DATE_CASE_2,
+                            REGEX_DATE_CASE_3,
                             REGEX_DATE_CASE_4,
                             REGEX_DATE_CASE_5,
                         ]
@@ -442,8 +451,8 @@ class FacebookEventScraper:
             "date": date_line,
             "start_dt": start_dt,
             "end_dt": end_dt,
-            "title": title,
-            "location": location,
+            "title": title or keyword,
+            "location": location or city_cap,
         }
         logger.info("✅ Event parsed: %s", extracted_info)
         return extracted_info
