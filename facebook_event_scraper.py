@@ -27,6 +27,11 @@ except Exception:
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+REGEX_TIME_CASE = r"(\d{1,2}:\d{2})\s*à\s*(\d{1,2}:\d{2})"
+REGEX_DATE_CASE_2 = r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})"
+REGEX_DATE_CASE_4 = r"(?:[a-zéû\.]+)?\s*(\d{1,2}) ([a-zéû\.]+) (\d{4}) à (\d{2}:\d{2})"
+REGEX_DATE_CASE_5 = r"du (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2}) au (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2})"
+
 
 # ---------------------------
 # 🔹 Email sender
@@ -75,7 +80,8 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     - 'Demain de 19:00 à 23:00'
     - 'samedi de 20:00 à 01:30'
     - 'Samedi 11 avril 2026 de 20:00 à 01:30'
-    - TODO this case 'du 18 déc. 20:00 au 22 déc. 03:00'
+    - 'Vendredi 19 septembre 2025 à 21:00'
+    - 'du 18 déc. 20:00 au 22 déc. 03:00'
     Returns: (start_datetime, end_datetime)
     """
     if ref_date is None:
@@ -84,8 +90,67 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     date_text = date_text.strip().lower()
     start_dt, end_dt = None, None
 
+    fr_months = {
+        "janvier": "january",
+        "février": "february",
+        "mars": "march",
+        "avril": "april",
+        "mai": "may",
+        "juin": "june",
+        "juillet": "july",
+        "août": "august",
+        "septembre": "september",
+        "octobre": "october",
+        "novembre": "november",
+        "décembre": "december",
+        "janv.": "january",
+        "févr.": "february",
+        "avr.": "april",
+        "juil.": "july",
+        "sept.": "september",
+        "oct.": "october",
+        "nov.": "november",
+        "déc.": "december",
+        "mar.": "march",
+    }
+
+    # Case: du 18 déc. 20:00 au 22 déc. 03:00
+    range_match = re.search(REGEX_DATE_CASE_5, date_text)
+    if range_match:
+        day1, month1, time1, day2, month2, time2 = range_match.groups()
+        month1_en = fr_months.get(month1.strip("."), month1)
+        month2_en = fr_months.get(month2.strip("."), month2)
+        year = ref_date.year
+        try:
+            start_dt = datetime.strptime(
+                f"{day1} {month1_en} {year} {time1}", "%d %B %Y %H:%M"
+            )
+            end_dt = datetime.strptime(
+                f"{day2} {month2_en} {year} {time2}", "%d %B %Y %H:%M"
+            )
+            # If end date is before start, assume next year
+            if end_dt < start_dt:
+                end_dt = end_dt.replace(year=year + 1)
+        except Exception:
+            return None, None
+        return start_dt, end_dt
+
+    # Case: Vendredi 19 septembre 2025 à 21:00
+    single_match = re.search(REGEX_DATE_CASE_4, date_text)
+    if single_match:
+        day, month, year, time_str = single_match.groups()
+        month_en = fr_months.get(month.strip("."), month)
+        try:
+            start_dt = datetime.strptime(
+                f"{day} {month_en} {year} {time_str}", "%d %B %Y %H:%M"
+            )
+            end_dt = start_dt
+        except Exception:
+            return None, None
+        return start_dt, end_dt
+
     # Extract times
-    time_match = re.search(r"(\d{1,2}:\d{2})\s*à\s*(\d{1,2}:\d{2})", date_text)
+    time_match = re.search(REGEX_TIME_CASE, date_text)
     if not time_match:
         return None, None
     start_time_str, end_time_str = time_match.groups()
@@ -98,25 +163,9 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         event_date = (ref_date + timedelta(days=1)).date()
 
     # Case 2: "samedi 11 avril 2026"
-    full_date_match = re.search(
-        r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})", date_text, re.IGNORECASE
-    )
+    full_date_match = re.search(REGEX_DATE_CASE_2, date_text)
     if full_date_match:
         day, month_fr, year = full_date_match.groups()
-        fr_months = {
-            "janvier": "january",
-            "février": "february",
-            "mars": "march",
-            "avril": "april",
-            "mai": "may",
-            "juin": "june",
-            "juillet": "july",
-            "août": "august",
-            "septembre": "september",
-            "octobre": "october",
-            "novembre": "november",
-            "décembre": "december",
-        }
         month_en = fr_months.get(month_fr.strip("."), month_fr)
         try:
             event_date = datetime.strptime(
@@ -161,11 +210,11 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
 
 
 class FacebookEventScraper:
-    def __init__(self, url, headless=True, state_path="state.json"):
-        self.url = url
-        self.headless = headless
-        self.state_path = state_path
-        self.seen = set()
+    def __init__(self, url: str, headless: bool = True, state_path: str = "state.json"):
+        self.url: str = url
+        self.headless: bool = headless
+        self.state_path: str = state_path
+        self.seen: set[str] = set()
         self.playwright = None
         self.browser = None
         self.context = None
@@ -174,17 +223,17 @@ class FacebookEventScraper:
     # ---------------------------
     # 🔹 Context Manager
     # ---------------------------
-    def __enter__(self):
+    def __enter__(self) -> "FacebookEventScraper":
         self.open()
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
     # ---------------------------
     # 🔹 Gestión del navegador
     # ---------------------------
-    def _ensure_login_state(self):
+    def _ensure_login_state(self) -> None:
         """Ensure Facebook login state is saved in state.json."""
         if not os.path.exists(self.state_path):
             with sync_playwright() as p:
@@ -200,19 +249,19 @@ class FacebookEventScraper:
         else:
             logger.info("✅ state.json found, using saved login state.")
 
-    def open(self):
+    def open(self) -> None:
         """Abre el navegador con sesión guardada."""
         self._ensure_login_state()
         self.playwright = sync_playwright().start()
         if os.path.exists(self.state_path):
-            self.browser = self.playwright.chromium.launch(headless=self.headless)
+            self.browser = self.playwright.chromium.launch(headless=False)
             self.context = self.browser.new_context(storage_state=self.state_path)
         else:
             self.browser = self.playwright.chromium.launch(headless=False)
             self.context = self.browser.new_context()
         self.page = self.context.new_page()
 
-    def close(self):
+    def close(self) -> None:
         """Cierra navegador y playwright."""
         if self.browser:
             self.browser.close()
@@ -220,92 +269,13 @@ class FacebookEventScraper:
             self.playwright.stop()
 
     # ---------------------------
-    # 🔹 Utilidades
+    # 🔹 Utilidades de navegación
     # ---------------------------
-    def _find_input(self, selectors):
-        """Try multiple selectors and return the first matching input element."""
-        for sel in selectors:
-            try:
-                self.page.wait_for_selector(sel, timeout=5000)
-                return sel
-            except Exception:
-                continue
-        return None
-
-    def _parse_event_page(self, event_url: str, keyword: str, city: str) -> dict | None:
-        """Visita la página del evento y extrae fecha, título, ubicación y stats."""
-        try:
-            logger.info("🔗 Visiting event page: %s", event_url)
-            self.page.goto(event_url, timeout=60000)
-        except Exception:
-            logger.error("❌ Error visiting event page")
-            return None
-
-        # título
-        try:
-            title = (
-                self.page.query_selector(f"span:has-text('{keyword}')")
-                .inner_text()
-                .strip()
-            )
-        except Exception:
-            logger.error("❌ Error extracting event title")
-            title = ""
-
-        # fecha
-        try:
-            date_line = ""
-            blocks = self.page.query_selector_all("div[role='button'][tabindex='0']")
-            for block in blocks:
-                spans = block.query_selector_all("span[dir='auto']")
-                for s in spans:
-                    text = s.inner_text().strip()
-                    if re.search(
-                        r"\d{1,2}:\d{2}\s*à\s*\d{1,2}:\d{2}", text
-                    ):  # pattern "20:00 à 01:30"
-                        date_line = text
-                        break
-        except Exception:
-            logger.error("❌ Error extracting event date")
-            date_line = ""
-
-        # ubicación
-        city = city.capitalize()
-        try:
-            location = (
-                self.page.query_selector(
-                    f"span:has-text('à {city} ({city})'), span:has-text('{city}, France')"
-                )
-                .inner_text()
-                .strip()
-            )
-        except Exception:
-            logger.error("❌ Error extracting event location")
-            location = ""
-
-        start_dt, end_dt = "", ""
-        if date_line:
-            start_dt, end_dt = parse_event_date(date_line)
-            date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
-
-        extracted_info = {
-            "fecha": date_line,
-            "start_dt": start_dt,
-            "end_dt": end_dt,
-            "titulo": title,
-            "ubicacion": location,
-        }
-        logger.info("✅ Event parsed: %s", extracted_info)
-        return extracted_info
-
-    # ---------------------------
-    # 🔹 Búsqueda de eventos
-    # ---------------------------
-    def scrape(self, ciudad, palabra_clave="", start_date=None, end_date=None):
-        url = f"{self.url}/events/search/?q={palabra_clave}"
+    def _goto_search_page(self, keyword: str) -> None:
+        url = f"{self.url}/events/search/?q={keyword}"
         self.page.goto(url, timeout=60000)
 
-        # insertar ciudad
+    def _select_location(self, city: str) -> None:
         location_selectors = [
             "input[placeholder*='Location']",
             "input[placeholder*='Ubicación']",
@@ -316,13 +286,13 @@ class FacebookEventScraper:
         ]
         location_input_sel = self._find_input(location_selectors)
         if location_input_sel:
-            self.page.fill(location_input_sel, ciudad)
+            self.page.fill(location_input_sel, city)
             time.sleep(1)
             self.page.keyboard.press("ArrowDown")
             time.sleep(1)
             try:
-                dropdown_selector = "ul[role='listbox'] li, div[role='option']"
-                self.page.wait_for_selector(dropdown_selector, timeout=5000)
+                dropdown_selector = ["ul[role='listbox'] li, div[role='option']"]
+                self._find_input(dropdown_selector)
                 suggestions = self.page.query_selector_all(dropdown_selector)
                 for s in suggestions:
                     if s.is_visible():
@@ -333,23 +303,50 @@ class FacebookEventScraper:
                 pass
             self.page.keyboard.press("Enter")
             time.sleep(1)
+        else:
+            logger.warning("⚠️ Location input not found")
 
-        # scroll infinito
+    def _select_this_week_filter(self, option: str = "Cette semaine") -> None:
+        """Select the 'Cette semaine' option in the Dates filter if available."""
+        try:
+            # Find the Dates filter div by its text
+            dates_div = self.page.query_selector("div:has-text('Dates')")
+            if dates_div:
+                dates_div.click()
+                time.sleep(1)
+                # Find and click the "Cette semaine" option in the dropdown
+                semaine_option = self.page.query_selector(
+                    f"div[role='menu'] >> text='{option}'"
+                )
+                if not semaine_option:
+                    # Fallback: try any element with the text
+                    semaine_option = self.page.query_selector(f"text='{option}'")
+                if semaine_option:
+                    semaine_option.click()
+                    time.sleep(1)
+                else:
+                    logger.warning(f"⚠️ '{option}' option not found in Dates filter")
+            else:
+                logger.warning("⚠️ Dates filter div not found")
+        except Exception as ex:
+            logger.error(f"❌ Error selecting '{option}' filter: {ex}")
+
+    def _scroll_events(self, scroll_count: int = 10, delay: int = 1) -> None:
         prev_height = 0
-        for _ in range(10):
+        for _ in range(scroll_count):
             self.page.mouse.wheel(0, 3000)
-            time.sleep(1)
+            time.sleep(delay)
             new_height = self.page.evaluate("document.body.scrollHeight")
             if new_height == prev_height:
                 break
             prev_height = new_height
 
-        # extraer eventos
-        eventos = []
+    def _extract_event_links(self) -> list[str]:
         hrefs = [
             link.get_attribute("href")
             for link in self.page.query_selector_all("a[href*='/events/']")
         ]
+        event_links: list[str] = []
         for href in hrefs:
             if not href or "events" not in href or self.url in href:
                 continue
@@ -357,37 +354,153 @@ class FacebookEventScraper:
             if clean_href in self.seen:
                 continue
             self.seen.add(clean_href)
+            event_links.append(clean_href)
+        return event_links
 
-            # ahora visitamos la página del evento
-            info = self._parse_event_page(self.url + clean_href, palabra_clave, ciudad)
+        # ---------------------------
+
+    # 🔹 Utilidades
+    # ---------------------------
+    def _find_input(self, selectors: list[str]) -> str | None:
+        """Try multiple selectors and return the first matching input element."""
+        for sel in selectors:
+            try:
+                self.page.wait_for_selector(sel, timeout=5000)
+                return sel
+            except Exception:
+                continue
+        return None
+
+    def _parse_event_page(
+        self, event_url: str, keyword: str, city: str
+    ) -> dict[str, Any] | None:
+        try:
+            logger.info("🔗 Visiting event page: %s", event_url)
+            self.page.goto(event_url, timeout=60000)
+        except Exception:
+            logger.error("❌ Error visiting event page")
+            return None
+
+        blocks = self.page.query_selector_all("div[role='button'][tabindex='0']")
+
+        # title
+        try:
+            title = ""
+            for block in blocks:
+                spans = block.query_selector_all(f"span:has-text('{keyword}')")
+                for s in spans:
+                    title = s.inner_text().strip()
+                    if title:
+                        break
+        except Exception:
+            logger.error("❌ Error extracting event title")
+            title = ""
+
+        # date
+        try:
+            date_line = ""
+            for block in blocks:
+                spans = block.query_selector_all("span[dir='auto']")
+                for s in spans:
+                    text = s.inner_text().strip()
+                    if any(
+                        re.search(pattern, text, re.IGNORECASE)
+                        for pattern in [
+                            REGEX_DATE_CASE_2,
+                            REGEX_DATE_CASE_4,
+                            REGEX_DATE_CASE_5,
+                        ]
+                    ):
+                        date_line = text
+                        break
+        except Exception:
+            logger.error("❌ Error extracting event date")
+            date_line = ""
+
+        # location
+        city_cap = city.capitalize()
+        try:
+            location = ""
+            for block in blocks:
+                spans = block.query_selector_all(
+                    f"span:has-text('à {city_cap} ({city_cap})'), span:has-text('{city_cap}, France')"
+                )
+                for s in spans:
+                    location = s.inner_text().strip()
+                    if location:
+                        break
+        except Exception:
+            logger.error("❌ Error extracting event location")
+            location = ""
+
+        start_dt, end_dt = "", ""
+        if date_line:
+            start_dt, end_dt = parse_event_date(date_line)
+            date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
+
+        extracted_info: dict[str, Any] = {
+            "date": date_line,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "title": title,
+            "location": location,
+        }
+        logger.info("✅ Event parsed: %s", extracted_info)
+        return extracted_info
+
+    def _filter_event_by_date(
+        self, info: dict[str, Any], start_date: datetime, end_date: datetime
+    ) -> bool:
+        start_dt = info["start_dt"]
+        if not (start_date and end_date):
+            return True
+        return start_dt and start_date <= start_dt <= end_date
+
+    # ---------------------------
+    # 🔹 Búsqueda de eventos
+    # ---------------------------
+    def scrape(
+        self,
+        city: str,
+        keyword: str = "",
+        start_date: datetime = None,
+        end_date: datetime = None,
+    ) -> list[dict[str, Any]]:
+        self._goto_search_page(keyword)
+        self._select_location(city)
+        # self._select_this_week_filter("Cette semaine")
+        self._scroll_events()
+        event_links = self._extract_event_links()
+        events = []
+        for clean_href in event_links:
+            info = self._parse_event_page(self.url + clean_href, keyword, city)
             if not info or not all(info.values()):
                 continue
-
-            start_dt = info["start_dt"]
-            end_dt = info["end_dt"]
-            matches_date = not (start_date and end_date) or (
-                start_dt and start_date <= start_dt <= end_date
-            )
-            if matches_date:
-                eventos.append(
+            if self._filter_event_by_date(info, start_date, end_date):
+                events.append(
                     {
-                        "titulo": info["titulo"],
+                        "title": info["title"],
                         "link": self.url + clean_href,
-                        "fecha": info["fecha"],
-                        "start_dt": start_dt,
-                        "end_dt": end_dt,
-                        "ubicacion": info["ubicacion"],
+                        "date": info["date"],
+                        "start_dt": info["start_dt"],
+                        "end_dt": info["end_dt"],
+                        "location": info["location"],
                     }
                 )
-        return eventos
+        return events
 
-    def scrape_multiple(self, ciudad, palabras_claves, start_date=None, end_date=None):
-        """Ejecuta varias búsquedas con una lista de palabras clave."""
+    def scrape_multiple(
+        self,
+        city: str,
+        keywords: list[str],
+        start_date: datetime = None,
+        end_date: datetime = None,
+    ) -> dict[str, list[dict[str, Any]]]:
         all_results = {}
-        for palabra in palabras_claves:
-            logger.info("🔍 Buscando: %s", palabra)
-            eventos = self.scrape(ciudad, palabra, start_date, end_date)
-            all_results[palabra] = eventos
+        for keyword in keywords:
+            logger.info("🔍 Searching: %s", keyword)
+            events = self.scrape(city, keyword, start_date, end_date)
+            all_results[keyword] = events
         return all_results
 
 
