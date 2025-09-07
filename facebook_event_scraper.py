@@ -24,6 +24,15 @@ except Exception:
     pass  # fallback if system doesn't have French locale
 
 
+DATE_KEYWORDS = [
+    "date",
+    "dates",
+    "fecha",
+    "fechas",
+    "jour",
+    "jours",
+    "datum",
+]  # add languages as needed
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -214,7 +223,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     # Case 3: only weekday (samedi, dimanche, etc.) or "mercredi de 23:00 à 05:00"
     else:
         for wd_name, wd_num in WEEKDAYS.items():
-            if wd_name in date_text:
+            if wd_name in date_text and wd_num > 0:
                 days_ahead = (wd_num - ref_date.weekday()) % 7
                 event_date = (ref_date + timedelta(days=days_ahead)).date()
                 break
@@ -334,30 +343,158 @@ class FacebookEventScraper:
         else:
             logger.warning("⚠️ Location input not found")
 
-    def _select_this_week_filter(self, option: str = "Cette semaine") -> None:
-        """Select the 'Cette semaine' option in the Dates filter if available."""
+    def _element_contains_date_text(self, el):
         try:
-            # Find the Dates filter div by its text
-            dates_div = self.page.query_selector("div:has-text('Dates')")
-            if dates_div:
-                dates_div.click()
-                time.sleep(1)
-                # Find and click the "Cette semaine" option in the dropdown
-                semaine_option = self.page.query_selector(
-                    f"div[role='menu'] >> text='{option}'"
+            text = el.inner_text() or ""
+        except Exception:
+            return False
+        text = text.strip().lower()
+        return any(k in text for k in DATE_KEYWORDS)
+
+    def _find_dates_element(self):
+        """
+        Try multiple selectors / strategies to find the "Dates" filter element.
+        Returns an element handle or None.
+        """
+        # 1) Some direct locators (case-insensitive regex text)
+        try:
+            # Playwright supports text=/.../ for regex matching
+            loc = self.page.locator(
+                "text=/\\b(dates?|date|fecha|fechas|jour|jours)\\b/i"
+            )
+            if loc.count() > 0:
+                # pick the first visible one
+                for i in range(loc.count()):
+                    candidate = loc.nth(i)
+                    if candidate.is_visible():
+                        return candidate
+        except Exception:
+            pass
+
+        # 2) Role-based tries
+        candidates = [
+            "button:has-text('Dates')",
+            "button:has-text('Date')",
+            "div[role='button']:has-text('Dates')",
+            "div[role='button']:has-text('Date')",
+            "div[role='button'][aria-label*='Date']",
+            "div[role='button'][title*='Date']",
+        ]
+        for sel in candidates:
+            try:
+                el = self.page.query_selector(sel)
+                if el and el.is_visible():
+                    return el
+            except Exception:
+                continue
+
+        # 3) If there's a Filters button/panel, try to open it and then look again
+        try:
+            filters_loc = self.page.locator("text=/filters|filtrer|filtros|filtres/i")
+            if filters_loc.count() > 0:
+                for i in range(filters_loc.count()):
+                    f = filters_loc.nth(i)
+                    if f.is_visible():
+                        f.click()
+                        time.sleep(0.5)
+                        # Try to find the dates element inside the now-open panel
+                        el = self.page.query_selector(
+                            "div[role='menu'] div:has-text('Dates'), div[role='menu'] div:has-text('Date')"
+                        )
+                        if el and el.is_visible():
+                            return el
+        except Exception:
+            pass
+
+        # 4) Fallback: iterate clickable elements and match text via Python
+        try:
+            clickable = self.page.query_selector_all(
+                "div[role='button'], button, a[role='button']"
+            )
+            for el in clickable:
+                try:
+                    if not el.is_visible():
+                        continue
+                    if self._element_contains_date_text(el):
+                        return el
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 5) Last-ditch XPath search for text nodes (case-insensitive)
+        try:
+            xpath = "//div[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dates') or contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'date') or contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'fecha')]"
+            el = self.page.query_selector(f"xpath={xpath}")
+            if el and el.is_visible():
+                return el
+        except Exception:
+            pass
+
+        return None
+
+    def _select_date_filter(self, option: str) -> bool:
+        """
+        Click the Dates filter then select the option (e.g. 'Cette semaine').
+        Returns True if option was clicked, False otherwise.
+        """
+        try:
+            dates_el = self._find_dates_element()
+            if not dates_el:
+                logger.warning("⚠️ Could not locate Dates filter element")
+                return False
+
+            dates_el.click()
+            # short wait for dropdown/menu to render
+            try:
+                self.page.wait_for_timeout(700)
+            except Exception:
+                time.sleep(0.7)
+
+            # Look for the option inside an open menu/panel
+            option_selector_variants = [
+                f"div[role='menu'] div:has-text('{option}')",
+                f"div[role='menu'] span:has-text('{option}')",
+                f"text=/{re.escape(option)}/i",
+                f"div:has-text('{option}')",
+            ]
+
+            for sel in option_selector_variants:
+                try:
+                    # wait a bit only when selector includes role=menu
+                    if "role='menu'" in sel:
+                        self.page.wait_for_selector(sel, timeout=3000)
+                    opt = self.page.query_selector(sel)
+                    if opt and opt.is_visible():
+                        opt.click()
+                        logger.info(f"✅ Selected date option: {option}")
+                        return True
+                except Exception:
+                    continue
+
+            # fallback: scan visible menu items after clicking
+            try:
+                menu_items = self.page.query_selector_all(
+                    "div[role='menu'] div, div[role='menu'] li, div[role='menu'] a"
                 )
-                if not semaine_option:
-                    # Fallback: try any element with the text
-                    semaine_option = self.page.query_selector(f"text='{option}'")
-                if semaine_option:
-                    semaine_option.click()
-                    time.sleep(1)
-                else:
-                    logger.warning(f"⚠️ '{option}' option not found in Dates filter")
-            else:
-                logger.warning("⚠️ Dates filter div not found")
+                for mi in menu_items:
+                    try:
+                        text = (mi.inner_text() or "").strip()
+                    except Exception:
+                        text = ""
+                    if text and option.lower() in text.lower():
+                        mi.click()
+                        logger.info(f"✅ Selected date option by fallback text: {text}")
+                        return True
+            except Exception:
+                pass
+
+            logger.warning(f"⚠️ Option '{option}' not found after opening Dates filter")
+            return False
+
         except Exception as ex:
             logger.error(f"❌ Error selecting '{option}' filter: {ex}")
+            return False
 
     def _scroll_events(self, scroll_count: int = 10, delay: int = 1) -> None:
         prev_height = 0
@@ -465,7 +602,8 @@ class FacebookEventScraper:
         start_dt, end_dt = "", ""
         if date_line:
             start_dt, end_dt = parse_event_date(date_line)
-            date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
+            if start_dt and end_dt:
+                date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
 
         extracted_info: dict[str, Any] = {
             "date": date_line,
@@ -497,7 +635,7 @@ class FacebookEventScraper:
     ) -> list[dict[str, Any]]:
         self._goto_search_page(keyword)
         self._select_location(city)
-        # self._select_this_week_filter("Cette semaine")
+        self._select_date_filter("Cette semaine")
         self._scroll_events()
         event_links = self._extract_event_links()
         events = []
@@ -545,6 +683,7 @@ if __name__ == "__main__":
         resultados = scraper.scrape_multiple(
             city,
             [
+                "Agua",
                 "Honduras",
                 "Dominican Republic",
                 "Ranchera",
