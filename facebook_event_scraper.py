@@ -27,11 +27,47 @@ except Exception:
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+FR_MONTHS = {
+    "janvier": "january",
+    "février": "february",
+    "mars": "march",
+    "avril": "april",
+    "mai": "may",
+    "juin": "june",
+    "juillet": "july",
+    "août": "august",
+    "septembre": "september",
+    "octobre": "october",
+    "novembre": "november",
+    "décembre": "december",
+    "janv": "january",
+    "févr": "february",
+    "avr": "april",
+    "juil": "july",
+    "sept": "september",
+    "oct": "october",
+    "nov": "november",
+    "déc": "december",
+    "mar": "march",
+}
+
+WEEKDAYS = {
+    "demain": None,
+    "lundi": 0,
+    "mardi": 1,
+    "mercredi": 2,
+    "jeudi": 3,
+    "vendredi": 4,
+    "samedi": 5,
+    "dimanche": 6,
+}
+
 REGEX_TIME_CASE = r"(\d{1,2}:\d{2})\s*à\s*(\d{1,2}:\d{2})"
 REGEX_DATE_CASE_2 = r"(?:[a-zéû\.]+)\s+de\s+(\d{1,2}:\d{2})\s+à\s+(\d{1,2}:\d{2})"
 REGEX_DATE_CASE_3 = r"(\d{1,2})\s+([a-zéû\.]+)\s+(\d{4})"
 REGEX_DATE_CASE_4 = r"(?:[a-zéû\.]+)?\s*(\d{1,2}) ([a-zéû\.]+) (\d{4}) à (\d{2}:\d{2})"
 REGEX_DATE_CASE_5 = r"du (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2}) au (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2})"
+REGEX_DATE_CASE_6 = r"(" + "|".join(WEEKDAYS.keys()) + r")\s*à\s*(\d{1,2}:\d{2})"
 
 
 # ---------------------------
@@ -83,6 +119,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     - 'Samedi 11 avril 2026 de 20:00 à 01:30'
     - 'Vendredi 19 septembre 2025 à 21:00'
     - 'du 18 déc. 20:00 au 22 déc. 03:00'
+    - 'mercredi à 20:00' and 'demain à 20:00'
     Returns: (start_datetime, end_datetime)
     """
     if ref_date is None:
@@ -91,36 +128,12 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     date_text = date_text.strip().lower()
     start_dt, end_dt = None, None
 
-    fr_months = {
-        "janvier": "january",
-        "février": "february",
-        "mars": "march",
-        "avril": "april",
-        "mai": "may",
-        "juin": "june",
-        "juillet": "july",
-        "août": "august",
-        "septembre": "september",
-        "octobre": "october",
-        "novembre": "november",
-        "décembre": "december",
-        "janv": "january",
-        "févr": "february",
-        "avr": "april",
-        "juil": "july",
-        "sept": "september",
-        "oct": "october",
-        "nov": "november",
-        "déc": "december",
-        "mar": "march",
-    }
-
     # Case 5: du 18 déc. 20:00 au 22 déc. 03:00
     range_match = re.search(REGEX_DATE_CASE_5, date_text)
     if range_match:
         day1, month1, time1, day2, month2, time2 = range_match.groups()
-        month1_en = fr_months.get(month1.strip("."), month1)
-        month2_en = fr_months.get(month2.strip("."), month2)
+        month1_en = FR_MONTHS.get(month1.strip("."), month1)
+        month2_en = FR_MONTHS.get(month2.strip("."), month2)
         year = ref_date.year
         # Infer year for start and end dates
         try:
@@ -145,7 +158,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     single_match = re.search(REGEX_DATE_CASE_4, date_text)
     if single_match:
         day, month, year, time_str = single_match.groups()
-        month_en = fr_months.get(month.strip("."), month)
+        month_en = FR_MONTHS.get(month.strip("."), month)
         try:
             start_dt = datetime.strptime(
                 f"{day} {month_en} {year} {time_str}", "%d %B %Y %H:%M"
@@ -154,6 +167,23 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         except Exception:
             logger.error(f"❌ Error parsing single date case 4: {date_text}")
             return None, None
+        return start_dt, end_dt
+
+    # Case 6: Handle "demain à HH:MM" and "<weekday> à HH:MM"
+    match = re.search(REGEX_DATE_CASE_6, date_text)
+    if match:
+        wd_name, time_str = match.groups()
+        if wd_name == "demain":
+            event_date = (ref_date + timedelta(days=1)).date()
+        else:
+            wd_num = WEEKDAYS[wd_name]
+            days_ahead = (wd_num - ref_date.weekday()) % 7
+            event_date = (ref_date + timedelta(days=days_ahead)).date()
+        hour, minute = map(int, time_str.split(":"))
+        start_dt = datetime.combine(event_date, datetime.min.time()).replace(
+            hour=hour, minute=minute
+        )
+        end_dt = start_dt
         return start_dt, end_dt
 
     # Extract times
@@ -173,7 +203,7 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
     full_date_match = re.search(REGEX_DATE_CASE_3, date_text)
     if full_date_match:
         day, month_fr, year = full_date_match.groups()
-        month_en = fr_months.get(month_fr.strip("."), month_fr)
+        month_en = FR_MONTHS.get(month_fr.strip("."), month_fr)
         try:
             event_date = datetime.strptime(
                 f"{day} {month_en} {year}", "%d %B %Y"
@@ -181,19 +211,9 @@ def parse_event_date(date_text: str, ref_date: datetime = None):
         except Exception:
             logger.error(f"❌ Error parsing full date case 2: {date_text}")
             pass
-
     # Case 3: only weekday (samedi, dimanche, etc.) or "mercredi de 23:00 à 05:00"
     else:
-        weekdays = {
-            "lundi": 0,
-            "mardi": 1,
-            "mercredi": 2,
-            "jeudi": 3,
-            "vendredi": 4,
-            "samedi": 5,
-            "dimanche": 6,
-        }
-        for wd_name, wd_num in weekdays.items():
+        for wd_name, wd_num in WEEKDAYS.items():
             if wd_name in date_text:
                 days_ahead = (wd_num - ref_date.weekday()) % 7
                 event_date = (ref_date + timedelta(days=days_ahead)).date()
