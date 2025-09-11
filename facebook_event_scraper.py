@@ -3,11 +3,15 @@ import re
 import time
 import smtplib
 import logging
+import json
+from itertools import chain
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+from playwright._impl._element_handle import ElementHandle
 from typing import Any
+from pathlib import Path
 import locale
 
 logging.basicConfig(
@@ -24,6 +28,9 @@ except Exception:
     pass  # fallback if system doesn't have French locale
 
 
+BASE_DIR = Path(__file__).parent
+OUTPUT_FOLDER = BASE_DIR.joinpath("output")
+
 DATE_KEYWORDS = [
     "date",
     "dates",
@@ -35,6 +42,7 @@ DATE_KEYWORDS = [
 ]  # add languages as needed
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+OUTPUT_FILE_DATETIME_FORMAT = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 FR_MONTHS = {
     "janvier": "january",
@@ -60,6 +68,16 @@ FR_MONTHS = {
     "mar": "march",
 }
 
+FR_WEEKDAY = {
+    "monday": "lundi",
+    "tuesday": "mardi",
+    "wednesday": "mercredi",
+    "thursday": "jeudi",
+    "friday": "vendredi",
+    "saturday": "samedi",
+    "sunday": "dimanche",
+}
+
 WEEKDAYS = {
     "demain": -1,
     "lundi": 0,
@@ -79,11 +97,29 @@ REGEX_DATE_CASE_5 = r"du (\d{1,2}) ([a-zéû\.]+)\.? (\d{2}:\d{2}) au (\d{1,2}) 
 REGEX_DATE_CASE_6 = r"(" + "|".join(WEEKDAYS.keys()) + r")\s*à\s*(\d{1,2}:\d{2})"
 
 
+def default(date: datetime | Any) -> str | Any:
+    if isinstance(date, datetime):
+        return date.strftime(DATETIME_FORMAT)
+    return date
+
+
+def save_events_to_json(
+    eventos: list[dict[str, Any]], output_folder: Path = OUTPUT_FOLDER
+) -> Path:
+    """Save events to a JSON file and return the file path."""
+    output_folder.mkdir(parents=True, exist_ok=True)
+    file_path = output_folder.joinpath(f"events_{OUTPUT_FILE_DATETIME_FORMAT}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(eventos, f, ensure_ascii=False, indent=4, default=default)
+    logger.info("✅ Events saved to JSON file: %s", file_path)
+    return file_path
+
+
 # ---------------------------
 # 🔹 Email sender
 # ---------------------------
 def send_events_email(
-    eventos: dict[str, list[dict[str, Any]]],
+    events: list[dict[str, Any]],
     city: str,
     start_date: datetime,
     end_date: datetime,
@@ -94,6 +130,9 @@ def send_events_email(
     smtp_port: int = 587,
 ):
     """Send events via email using SMTP."""
+    # Save events to JSON file
+    json_file_path = save_events_to_json(events)
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = (
         f"📅 Facebook Events Report {city.capitalize()}. From {start_date.strftime(DATE_FMT)} to {end_date.strftime(DATE_FMT)}"
@@ -103,13 +142,20 @@ def send_events_email(
 
     # build HTML body
     html = "<h1>Facebook Events</h1>"
-    for eventos in eventos.values():
-        for e in eventos:
-            html += f"<li><b>{e['title']}</b> - {e['date']} - {e['location']}<br>"
-            html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
-        html += "</ul>"
+    for e in events:
+        html += f"<li><b>{e['title']}</b> - {e['date']} - {e['location']}<br>"
+        html += f"<a href='{e['link']}'>🔗 Event Link</a></li>"
+    html += "</ul>"
 
     msg.attach(MIMEText(html, "html"))
+
+    # Attach the JSON file
+    with open(json_file_path, "rb") as f:
+        attachment = MIMEText(f.read(), "base64", "utf-8")
+        attachment.add_header(
+            "Content-Disposition", "attachment", filename="events.json"
+        )
+        msg.attach(attachment)
 
     # send email
     with smtplib.SMTP(smtp_server, smtp_port) as server:
@@ -536,21 +582,10 @@ class FacebookEventScraper:
                 continue
         return None
 
-    def _parse_event_page(
-        self, event_url: str, keyword: str, city: str
-    ) -> dict[str, Any] | None:
+    @staticmethod
+    def _get_event_title(blocks: list[ElementHandle], keyword: str) -> str:
+        title = ""
         try:
-            logger.info("🔗 Visiting event page: %s", event_url)
-            self.page.goto(event_url, timeout=60000)
-        except Exception:
-            logger.error("❌ Error visiting event page")
-            return None
-
-        blocks = self.page.query_selector_all("div[role='button'][tabindex='0']")
-
-        # title
-        try:
-            title = ""
             for block in blocks:
                 spans = block.query_selector_all(f"span:has-text('{keyword}')")
                 for s in spans:
@@ -559,11 +594,12 @@ class FacebookEventScraper:
                         break
         except Exception:
             logger.error("❌ Error extracting event title")
-            title = ""
+        return title
 
-        # date
+    @staticmethod
+    def _get_event_date(blocks: list[ElementHandle]) -> str:
+        date = ""
         try:
-            date_line = ""
             for block in blocks:
                 spans = block.query_selector_all("span[dir='auto']")
                 for s in spans:
@@ -577,16 +613,17 @@ class FacebookEventScraper:
                             REGEX_DATE_CASE_5,
                         ]
                     ):
-                        date_line = text
+                        date = text
                         break
         except Exception:
             logger.error("❌ Error extracting event date")
-            date_line = ""
+        return date
 
-        # location
+    @staticmethod
+    def _get_event_location(blocks: list[ElementHandle], city: str) -> str:
         city_cap = city.capitalize()
+        location = ""
         try:
-            location = ""
             for block in blocks:
                 spans = block.query_selector_all(
                     f"span:has-text('à {city_cap} ({city_cap})'), span:has-text('{city_cap}, France')"
@@ -597,20 +634,90 @@ class FacebookEventScraper:
                         break
         except Exception:
             logger.error("❌ Error extracting event location")
-            location = ""
+        return location
+
+    def _get_event_banner_image(self) -> str | None:
+        """Extract the banner image link from the event page."""
+        try:
+            banner_img = self.page.query_selector(
+                "img[data-imgperflogname='profileCoverPhoto']"
+            )
+            if banner_img:
+                # Prefer highest resolution if available
+                srcset = banner_img.get_attribute("srcset")
+                if srcset:
+                    # srcset looks like "url1 320w, url2 640w, url3 1280w"
+                    urls = [s.strip().split(" ")[0] for s in srcset.split(",")]
+                    return urls[-1]  # last one is usually highest res
+                return banner_img.get_attribute("src")
+        except Exception as ex:
+            logger.error(f"❌ Error extracting banner image: {ex}")
+        return None
+
+    def _get_event_description(self) -> str:
+        """Extract the event description (with fallback and 'See more' expansion)."""
+        try:
+            # Expand "See more" if present
+            see_more = self.page.query_selector(
+                "div[data-testid='event-permalink-details'] span:has-text('En voir plus')"
+            )
+            if see_more:
+                see_more.click()
+                time.sleep(1)
+
+            # Try main selector
+            description_block = self.page.query_selector(
+                "div[data-testid='event-permalink-details']"
+            )
+            if description_block:
+                return description_block.inner_text().strip()
+
+            # Fallback: look for any block with role=article (sometimes used)
+            fallback_block = self.page.query_selector("div[role='article']")
+            if fallback_block:
+                return fallback_block.inner_text().strip()
+
+        except Exception as ex:
+            logger.error(f"❌ Error extracting event description: {ex}")
+        return ""
+
+    def _parse_event_page(
+        self, event_url: str, keyword: str, city: str
+    ) -> dict[str, Any] | None:
+        try:
+            logger.info("🔗 Visiting event page: %s", event_url)
+            self.page.goto(event_url, timeout=60000)
+        except Exception:
+            logger.error("❌ Error visiting event page")
+            return None
+
+        blocks = self.page.query_selector_all("div[role='button'][tabindex='0']")
+        title = self._get_event_title(blocks, keyword)
+        date_line = self._get_event_date(blocks)
+        location = self._get_event_location(blocks, city)
+        description = self._get_event_description()
+        banner_image = self._get_event_banner_image()
 
         start_dt, end_dt = "", ""
         if date_line:
             start_dt, end_dt = parse_event_date(date_line)
             if start_dt and end_dt:
-                date_line = f"from {start_dt.strftime(DATETIME_FORMAT)} to {end_dt.strftime(DATETIME_FORMAT)}"
+                weekday_fr = FR_WEEKDAY[start_dt.strftime("%A").lower()].capitalize()
+                start_time = start_dt.strftime("%Hh%M")
+                end_time = end_dt.strftime("%Hh%M")
+                date_line = f"{weekday_fr} - {start_time} à {end_time}"
 
         extracted_info: dict[str, Any] = {
             "date": date_line,
             "start_dt": start_dt,
             "end_dt": end_dt,
-            "title": title or keyword,
-            "location": location or city_cap,
+            "title": title or "not found",
+            "location": location or "not found",
+            "description": description or "not found",
+            "image": banner_image or "not found",
+            "link": event_url,
+            "cost": "not found",
+            "type": "not found",
         }
         logger.info("✅ Event parsed: %s", extracted_info)
         return extracted_info
@@ -644,16 +751,7 @@ class FacebookEventScraper:
             if not info or not all(info.values()):
                 continue
             if self._filter_event_by_date(info, start_date, end_date):
-                events.append(
-                    {
-                        "title": info["title"],
-                        "link": self.url + clean_href,
-                        "date": info["date"],
-                        "start_dt": info["start_dt"],
-                        "end_dt": info["end_dt"],
-                        "location": info["location"],
-                    }
-                )
+                events.append(info)
         return events
 
     def scrape_multiple(
@@ -683,6 +781,7 @@ if __name__ == "__main__":
         resultados = scraper.scrape_multiple(
             city,
             [
+                "fiesta",
                 "Agua",
                 "Honduras",
                 "Dominican Republic",
@@ -696,7 +795,7 @@ if __name__ == "__main__":
                 "Bolivia",
                 "Brasil",
                 "cueca",
-                "Argentine",
+                "Argentin",
                 "kizomba",
                 "España",
                 "Costa Rica",
@@ -724,7 +823,6 @@ if __name__ == "__main__":
                 "Chile",
                 "Peru",
                 "Son Cubain",
-                "fiesta",
                 "caporales",
                 "Guanacasteco",
                 "Republique dominicaine",
@@ -761,7 +859,7 @@ if __name__ == "__main__":
                 "latina",
                 "Candombe",
                 "salsa",
-                "bresil",
+                "brésil",
                 "latin",
                 "Argentina",
                 "Español",
@@ -792,18 +890,18 @@ if __name__ == "__main__":
             end_date=end,
         )
 
-    for eventos in resultados.values():
-        for e in eventos:
-            logger.info("📌 %s", e["title"])
-            logger.info("🔗 %s", e["link"])
-            logger.info("🗓️ %s", e["date"])
-            logger.info("🗓️ %s", e["start_dt"])
-            logger.info("🗓️ %s", e["end_dt"])
-            logger.info("-" * 50)
+    events = list(chain.from_iterable(resultados.values()))
+    for e in events:
+        logger.info("📌 %s", e["title"])
+        logger.info("🔗 %s", e["link"])
+        logger.info("🗓️ %s", e["date"])
+        logger.info("🗓️ %s", e["start_dt"])
+        logger.info("🗓️ %s", e["end_dt"])
+        logger.info("-" * 50)
 
     # send results by email
     send_events_email(
-        resultados,
+        events,
         city,
         start,
         end,
