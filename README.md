@@ -21,15 +21,34 @@ This project is a web scraper designed to extract event details from Facebook ev
 ## Installation
 
 1. Clone the repository:
+
    ```bash
    git clone <repository-url>
    cd hispanie_scrapper
    ```
-2. Install the required dependencies:
+
+2. Create a virtual environment:
+
+   ```bash
+   python3 -m venv venv
+   ```
+
+3. Activate the virtual environment:
+
+   - On Linux/Mac:
+     ```bash
+     source venv/bin/activate
+     ```
+   - On Windows:
+     ```bash
+     venv\Scripts\activate
+     ```
+
+4. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Install Playwright browsers:
+5. Install Playwright browsers:
    ```bash
    playwright install chromium
    ```
