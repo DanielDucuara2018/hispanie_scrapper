@@ -104,11 +104,15 @@ def default(date: datetime | Any) -> str | Any:
 
 
 def save_events_to_json(
-    eventos: list[dict[str, Any]], output_folder: Path = OUTPUT_FOLDER
+    eventos: list[dict[str, Any]],
+    city: str,
+    output_folder: Path = OUTPUT_FOLDER,
 ) -> Path:
     """Save events to a JSON file and return the file path."""
     output_folder.mkdir(parents=True, exist_ok=True)
-    file_path = output_folder.joinpath(f"events_{OUTPUT_FILE_DATETIME_FORMAT}.json")
+    file_path = output_folder.joinpath(
+        f"events_{city}_{OUTPUT_FILE_DATETIME_FORMAT}.json"
+    )
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(eventos, f, ensure_ascii=False, indent=4, default=default)
     logger.info("✅ Events saved to JSON file: %s", file_path)
@@ -131,7 +135,7 @@ def send_events_email(
 ):
     """Send events via email using SMTP."""
     # Save events to JSON file
-    json_file_path = save_events_to_json(events)
+    json_file_path = save_events_to_json(events, city)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = (
@@ -153,7 +157,7 @@ def send_events_email(
     with open(json_file_path, "rb") as f:
         attachment = MIMEText(f.read(), "base64", "utf-8")
         attachment.add_header(
-            "Content-Disposition", "attachment", filename="events.json"
+            "Content-Disposition", "attachment", filename=f"events_{city}.json"
         )
         msg.attach(attachment)
 
