@@ -926,6 +926,7 @@ if __name__ == "__main__":
         )
 
     events = list(chain.from_iterable(resultados.values()))
+    events.sort(key=lambda x: x.get("start_dt", ""))
     for e in events:
         logger.info("📌 %s", e["title"])
         logger.info("🔗 %s", e["link"])
