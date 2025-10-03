@@ -379,18 +379,8 @@ class FacebookEventScraper:
             time.sleep(1)
             self.page.keyboard.press("ArrowDown")
             time.sleep(1)
-            try:
-                dropdown_selector = ["ul[role='listbox'] li, div[role='option']"]
-                self._find_input(dropdown_selector)
-                suggestions = self.page.query_selector_all(dropdown_selector)
-                for s in suggestions:
-                    if s.is_visible():
-                        s.click()
-                        time.sleep(3)
-                        break
-            except Exception:
-                pass
             self.page.keyboard.press("Enter")
+            logger.info(f"✅ Selected location option: {city}")
             time.sleep(1)
         else:
             logger.warning("⚠️ Location input not found")
