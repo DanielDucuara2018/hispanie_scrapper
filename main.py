@@ -943,7 +943,7 @@ if __name__ == "__main__":
         city,
         start,
         end,
-        sender_email="youremail@gmail.com",
-        password="yourpassword",
-        recipient_emails=["target@example.com"],
+        sender_email=os.environ.get("HISPANIE_SCRAPPER_EMAIL_SENDER"),
+        password=os.environ.get("HISPANIE_SCRAPPER_EMAIL_PASSWORD").replace("-", " "),
+        recipient_emails=os.environ.get("HISPANIE_SCRAPPER_EMAIL_RECIPIENT").split(","),
     )
