@@ -360,9 +360,15 @@ class FacebookEventScraper:
     # ---------------------------
     # 🔹 Utilidades de navegación
     # ---------------------------
-    def _goto_search_page(self, keyword: str) -> None:
+    def _goto_search_page(self, keyword: str, retry: int = 3) -> None:
         url = f"{self.url}/events/search/?q={keyword}"
-        self.page.goto(url, timeout=60000)
+        try:
+            self.page.goto(url, timeout=60000)
+        except Exception as e:
+            logger.warning(f"failed going to {url}. Remaining retries {retry}")
+            if retry <= 0:
+                raise e
+            self._goto_search_page(keyword, retry - 1)
 
     def _select_location(self, city: str) -> None:
         location_selectors = [
@@ -922,6 +928,10 @@ if __name__ == "__main__":
                 "tropicalis",
                 "caricombo",
                 "urbanvoices",
+                "noche",
+                "tropiteca",
+                "locura",
+                "cubaine",
             ],
             start_date=start,
             end_date=end,
